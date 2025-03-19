@@ -118,6 +118,8 @@ def preprocess_compute(func, trainable):
     """
 
     def inner(self, *args, **kwargs):
+        print("COMPUTE")
+        return
         args = future.get(args)
         if not trainable and len(args) > 1:
             if all(isinstance(arg, dict) for arg in args):
