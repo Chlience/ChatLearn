@@ -23,7 +23,8 @@ from tqdm import tqdm
 
 while True:
     try:
-        sft_data = load_dataset('Dahoas/sft-static')
+        # sft_data = load_dataset('Dahoas/sft-static')
+        sft_data = load_dataset("parquet", data_dir="/app/data/sft-static/data")
         break
     except Exception as e:
         print(e)

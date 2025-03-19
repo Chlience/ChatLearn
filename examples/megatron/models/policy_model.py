@@ -31,8 +31,12 @@ from .constants import select_actions_from_right_padded
 
 
 class PolicyModel(GPTModel):
-    """PolicyModel"""
+    """PolicyModel 基于 Megatron GPTModel，调整了训练相关方法
 
+    Args:
+        GPTModel (GPTModel): Megatron GPTModel
+    """
+    
     def __init__(self,
                  num_tokentypes=0,
                  parallel_output=True,
@@ -45,8 +49,9 @@ class PolicyModel(GPTModel):
 
         self.tokenizer = get_tokenizer()
         self.stats = stats
-
+        
     def forward_lm(self, input_ids, position_ids, attention_mask, inference_params=None):
+        """language model forward"""
         lm_output = self.language_model(
             input_ids,
             position_ids,
@@ -56,6 +61,7 @@ class PolicyModel(GPTModel):
 
     def forward(self, all_token_ids, all_position_ids, all_token_attention_mask, training_inputs=None,
                 inference_params=None, inference_config=None):
+        """添加了 post_process 逻辑"""
         hiddens = self.forward_lm(all_token_ids, all_position_ids,
                                   all_token_attention_mask, inference_params=inference_params)  # [b, s, v]
         # note in middle pipeline, this all_token_logits is just a hidden

@@ -26,12 +26,14 @@ from chatlearn import RLHFEngine
 
 # pylint: disable=invalid-envvar-default,bad-exception-cause,ungrouped-imports
 if os.getenv("ENABLE_VLLM", False):
+    print("ENABLE_VLLM")
     try:
         from examples.megatron.models import VLLMPolicyInference as PolicyModel
     except Exception as e:
         raise RuntimeError("Cannot import vllm, please set vllm python path or install vllm first.") from e
 else:
     from examples.megatron.models import PolicyInference as PolicyModel
+    print("DISABLE_VLLM")
 
 
 if __name__ == "__main__":

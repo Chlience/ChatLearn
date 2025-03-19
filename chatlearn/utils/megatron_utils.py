@@ -130,6 +130,7 @@ def initialize_megatron( # pylint: disable=dangerous-default-value
     def finish_mpu_init():
         args = get_args()
         # Pytorch distributed.
+        # * 调用 Megatron-LM 的 _initialize_distributed 完成并行环境初始化
         _initialize_distributed()
 
         # Random seeds for reproducibility.
@@ -162,6 +163,7 @@ def initialize_megatron( # pylint: disable=dangerous-default-value
         return None
 
 def load_checkpoint(*_args, **kwargs):
+    # * 是否需要修改并行策略（所谓的动态并行策略）
     adaptive_parallel_strategy = False
     if "adaptive_parallel_strategy" in kwargs:
         adaptive_parallel_strategy = kwargs.pop("adaptive_parallel_strategy")
@@ -170,6 +172,7 @@ def load_checkpoint(*_args, **kwargs):
     args = get_args()
     target_tp = args.tensor_model_parallel_size
     target_pp = args.pipeline_model_parallel_size
+    # * 使用 megatron 重新构建并行模型
     state_dict, _, _ = _load_base_checkpoint(args.load, rank0=True)
     args.iteration = state_dict['iteration']
     checkpoint_args = state_dict['args']
@@ -181,6 +184,7 @@ def load_checkpoint(*_args, **kwargs):
         save_dir = save_dir + f"-transform-tp{target_tp}-pp{target_pp}"
         if not os.path.exists(save_dir):
             # use last rank so we can determin model_type by whether last pipeline stage contains pooler_head
+            #? GPT 和 REWARD 的区别？
             if torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1):
                 model_type = "GPT"
                 for key in unwrap_model(_args[0])[0].state_dict().keys():

@@ -38,8 +38,8 @@ class Executor:
 
         Args
         ----
-        models : List[BaseModule]
-            a list of modules
+        flow : callable
+             a function that defines model computation flow
         """
         self._set_flow(model_flow)
         self.args = get_args().runtime_args
@@ -77,6 +77,7 @@ class Executor:
             return self
         """
         self._flow = flow
+        # * 解析流程，获取模型和函数的对应关系
         self.model_to_call_funcs = FlowParser().parse(flow)
         for model, func_names in self.model_to_call_funcs.items():
             model.call_funcs += func_names
@@ -92,7 +93,7 @@ class Executor:
         return self.first_node.model
 
     def update_models(self, models):
-        # update local model with remote models
+        # * update local model with remote models（DistModel）
         new_models = []
         name_to_new_models = {model.name: model for model in models}
         for model in self.local_models:
@@ -118,14 +119,24 @@ class Executor:
         return next(self.model2iter[model])
 
     def get_merged_data(self, queues, encode=True, micro_batch_index=None, model_node=None, trainable=False):
+        """从多个队列中获取合并的数据
+        Args:
+            queues (list): 队列列表
+            encode (bool): 是否编码数据
+            micro_batch_index (int): 微批次索引
+            model_node (ModelNode): 模型节点
+            trainable (bool): 是否可训练
+        """
         mb0 = None
         if micro_batch_index is not None:
             mb0 = micro_batch_index
         data_list = [None] * len(queues)
+        # * merged_buffer[model_node][input_queues][micro_batchs] = data
         merged_buffer = self.merged_buffer[model_node]
         for index, queue in enumerate(queues):
             if index not in merged_buffer:
                 merged_buffer[index] = {}
+            # * 如果 merged_buffer 中已经存在 mb0，则直接返回
             if mb0 in merged_buffer[index]:
                 data_list[index] = merged_buffer[index].pop(mb0)
                 continue
@@ -164,7 +175,8 @@ class Executor:
 
     def generate_step_one_model_internal(self, model_node, in_queue, step_num, replica, func_name="forward_step", to_empty_cache=None,
                                          is_eval=False, to_onload=None, to_offload=None, micro_batch_index=None):
-        """
+        """在单个模型副本上执行推理步骤，支持动态加载和卸载模型
+        
         Args:
             model: DistModel
             in_queue: Queue
@@ -188,6 +200,7 @@ class Executor:
                 else:
                     mb, query = micro_batch_index, []
             else:
+                # * 单个数据队列，如 Policy
                 data = self.get_merged_data_locked([in_queue], micro_batch_index=micro_batch_index,
                                                    model_node=model_node, trainable=model_node.trainable)
                 assert len(data['data']) == 1
@@ -213,6 +226,7 @@ class Executor:
                 kwargs["to_offload"] = to_offload
             mb, query = get_next_data()
             assert isinstance(query, list)
+            # * 调用 replica.vllm_engine 的远程函数
             ret = replica.call_actor_remote_func(replica.vllm_engine, func_name, *query, **kwargs)
             output.append((ret, mb))
         else:
@@ -231,13 +245,21 @@ class Executor:
                 mb, query = get_next_data()
                 assert isinstance(query, list)
                 for actor in actors:
+                    # * 将一个 DP Rank 对应的所有 actor 唤醒并调用远程函数 func_name，展开 query 和 kwargs 作为参数
+                    # * data_parallel_rank=self.replica_id
+                    # * 所有 actor 的 dp_rank 一致
+                    # ? 给不同的 actor （根据 TP/PP 切分的模型不同部分）传递相同的数据合理吗？Megatron-LM 会特殊处理吗？
+                    # * TP 组输入数据共享。
+                    # * PP 组如何处理数据？
+                    # * 目前照抄就行，应该暂时不用管
                     ret = replica.call_actor_remote_func(actor, func_name, *query, **kwargs)
                     output.append((ret, mb))
         return output
 
     def generate_step_one_model(self, model_node, replica, in_queue, out_queue, step_num, func_name="forward_step",
                                 to_empty_cache=None, is_eval=False, to_onload=None, to_offload=None, micro_batch_index=None):
-        """
+        """调度单个模型（副本）的推理任务，并将结果放入输出队列。
+        
         Args:
             model: DistModel
             in_queue: Queue
@@ -257,6 +279,7 @@ class Executor:
             #   are the same, and we choose output[-1] to put into out_queue.
             # If (tp > 1 or pp > 1) and ep > 1, we choose last output for each dp rank to put into
             #   out_queue.
+            # * EP Expert Parallelism 不同模型的并行
             if model.module_args.expert_model_parallel_size == 1:
                 result = [output[-1]]
             else:
@@ -283,6 +306,13 @@ class Executor:
         return out_queue, remote_refs
 
     def compute_loop_one_model(self, model_node, num_batch=None):
+        """在单个模型上执行推理循环，支持多副本调度
+
+        Args:
+            model_node (_type_): _description_
+            num_batch (_type_): _description_
+            is_eval (bool): _description_
+        """
         model = model_node.model
         is_eval = self.is_eval
 
@@ -290,14 +320,20 @@ class Executor:
             num_batch = self.num_iteration(model)
 
         func_name = model_node.func_name
+        # * 等待前置模型（共置/非共置）执行完毕
         if model_node.remote_objects_to_wait:
             model_node.wait_colocate_models_to_finish(self.timers, func_name)
         replica_num = len(model.replicas)
         last_step_start = max(num_batch - replica_num, 0)
+        # * last_step_start 标志了最后一次分配给模型副本的起始批次编号
+        # * 标志着进入最后一轮
         in_queue = model_node.get_input_queues()
         results = []
         self.timers(f"{model.name}").start()
+        # * 根据 batch 数量循环分配给 replica 执行
         for step in range(num_batch):
+            # * 第一轮需要加载参数
+            # * 最后一轮可以开始清理缓存和卸载参数
             to_empty_cache = step >= last_step_start and (model.is_colocate or model.module_args.force_free_memory)
             to_onload = step < replica_num and ((model.is_colocate and model.enable_offload) or model.module_args.force_free_memory)
             to_offload = step >= last_step_start and ((model.is_colocate and model.enable_offload) or model.module_args.force_free_memory)
@@ -310,20 +346,31 @@ class Executor:
             # before the execution of next colocate model, perform the wait, since we want to empty the cache.
             logger.info(
                 f"Model {model_node.next_colocate_node} will wait model {model} to finish since they are colocated")
+            # * 依赖但不共置的模型
             self._models_and_results_to_wait = model_node.next_colocate_node.add_dependent_colocate_model_results(
                 model_node, results, self._models_and_results_to_wait)
         elif model.colocate_models or model.trainable:
             # 1. the model may colocate with training/inference, so we should wait until the end of compute_loop
             # 2. the model is trainable and it does not have next_colocate_model, we should make sure it is finished before parameter_sync
             # so we add them to a temp list
+            # ? 共置模型中的最后一个
+            # ? 或者是可训练模型
             logger.info(f"Sync {model} in the end of {self.__class__.__name__}")
             self._models_and_results_to_wait.append((model_node, results))
 
     def compute_loop(self, out_queue, num_batch=None):
+        """执行整个模型流的推理循环
+
+        Args:
+            out_queue (_type_): _description_
+            num_batch (_type_): _description_
+        """
+        
         for model_group in self.model_flow.flow_topology:
             for model_node in model_group:
+                # * 按照拓扑层级执行，保证数据依赖
                 self.compute_loop_one_model(model_node, num_batch)
-
+        # * 返回值个数和 return_model_nodes 一致，每个返回值都是一个 List
         data = [None] * len(self.model_flow.return_model_nodes)
         for model_node in self.model_flow.model_nodes:
             self.timers(f"{model_node.model.name}").start()
@@ -340,6 +387,7 @@ class Executor:
             for model_name in model_names:
                 self.timers(f"{model_name}").start()
             func_name = self.model_flow.model_nodes[0].func_name
+            # * [barrier] 所有任务完成
             future.wait(results, f"{model_names} {func_name}")
             for model_name in model_names:
                 self.timers(f"{model_name}").stop()
@@ -348,16 +396,26 @@ class Executor:
             self.get_all_merged_data(data, out_queue, encode=False)
 
     def setup_queues(self):
+        """设置输入输出队列
+
+        Returns:
+            data_queues(List of Queue): 为头节点配置的输入队列，他们都需要从外部获取数据
+            out_queue(Queue): 为输出结果配置的输出队列
+        """
         data_queues = []
         out_queue = Queue()
+        # * 为头节点设置输入队列
         for model_node in self.model_flow.input_consumers:
             data_queue = Queue()
             data_queues.append(data_queue)
             model_node.set_input_queue(data_queue)
+        # * 为每个节点创建输出队列
+        # * 对于输出结果直接返回的节点，需要额外的输出队列
         for model_node in self.model_flow.model_nodes:
             num_out_queue = len(model_node.output_nodes)
             if model_node in self.model_flow.return_model_nodes:
                 num_out_queue += 1
             model_node.set_out_queues([Queue() for _ in range(num_out_queue)])
+        # * 注意，除了头节点其他的输入队列还没有设置，在 from_node 中找自己的 index
         return data_queues, out_queue
 # pylint: disable=not-callable

@@ -127,8 +127,20 @@ class DistActor:
         self.all_actors.append(actor)
         return actor
 
+    def _create_actor_without_group(self, cls, num_gpus, **kwargs):
+        # use max_concurrency=1 to make sure only one task execute at one time
+        actor = ray.remote(num_gpus=num_gpus, num_cpus=0)(cls) \
+            .remote(self.model.name, self.model.global_args, self.replica_id, **kwargs)
+        actor.set_error_signal.remote(self.error_signal)
+        actor.set_storage.remote(self.storage)
+        self.all_actors.append(actor)
+        return actor
+
     def create_actor(self, num_gpus, placement_group, group_index):
         return self._create_actor(self.model.__class__, num_gpus, placement_group, group_index)
+    
+    def create_actor_without_group(self, num_gpus):
+        return self._create_actor_without_group(self.model.__class__, num_gpus)
 
     def _setup_collective_group(self, rank_offset, world_size, group_name, backend="nccl"):
         refs = []
@@ -297,17 +309,24 @@ class DistVLLMActor(DistTorchActor):
 class DistModel:
     """DistModel"""
 
-    def __init__(self):
+    def __init__(self, model=None):
         self.replicas = []
         self.name = None
         self.rank_to_actors = {}
         self.register_func()
         self._is_colocate = False
         self._colocate_models = []
+        self._model = model
 
     def add_replica(self, replica):
         self.replicas.append(replica)
         self.name = replica.name
+        
+    @property
+    def model(self):
+        if self._model is not None:
+            return self._model
+        return self.replicas[0].model
 
     @property
     def trainable(self):
@@ -378,6 +397,7 @@ class DistModel:
                           "set_src_parameter_model",
                           "set_colocate"]:
             dist_call = partial(self.call_replica_func, func_name)
+            # * 动态注册方法，使得对于 func_name 的调用转化为对于 call_replica_func(func_name) 的调用，以对应分布式场景。
             setattr(self, func_name, dist_call)
 
     def call_replica_func(self, func, *args, **kwargs):

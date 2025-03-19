@@ -60,12 +60,14 @@ class ModelManager:
     def _get_total_gpu_required(self):
         total_gpu = 0
         remote_states = set()
+        # * 对于共置模型，取组内的最大值
         for group in self.runtime_args.colocation:
             colocate_models = [self._name2distmodel[name] for name in group]
             max_gpu = max(m.total_gpu for m in colocate_models)
             total_gpu += max_gpu
             for name in group:
                 remote_states.add(name)
+        # * 对于非共置模型，直接累加
         for model in self.dist_models:
             # place non-colocate models
             if model.name not in remote_states:
@@ -83,6 +85,7 @@ class ModelManager:
         self._name2distmodel = {}
         remote_states = set()
         for model in self.local_models:
+            # * 将 Model 转化为 DistModel
             dist_model = self._to_dist_model(model)
             self.dist_models.append(dist_model)
             self._name2distmodel[model.name] = dist_model
@@ -97,6 +100,7 @@ class ModelManager:
                            f"there is {self.resouce_manager.total_gpu - total_gpu_required} wasted gpus")
 
         env_list = []
+        # * 放置模型到计算资源上，放置的一组模型（共置 or 非共置）独占一组资源
         for group in self.runtime_args.colocation:
             colocate_models = [self._name2distmodel[name] for name in group]
             self.place_models_to_remote_devices(colocate_models, env_list)
@@ -104,10 +108,13 @@ class ModelManager:
                 set_colocate = []
                 for model in colocate_models:
                     model.is_colocate = True
+                    # * 将方法封装为了类型，实际上调用了 model.is_colocate(True)
                     set_colocate.extend(model.set_colocate(True))
+                    # * set_colocate 已被注册为分布式远程调用方法，将由 model 的每个 replica 调用
                 future.wait(set_colocate)
             for name in group:
                 remote_states.add(name)
+            # * remote_states 是保存已经放置的模型的名字
         for model in self.dist_models:
             # place non-colocate models
             if model.name not in remote_states:
@@ -188,6 +195,7 @@ class ModelManager:
                 future.wait(dst_model.offload())
 
     def set_func_decorator(self, model):
+        """ 为模型类的方法动态添加装饰器 """
         if is_decorated(model.name):
             return
         call_funcs = model.call_funcs
@@ -214,6 +222,8 @@ class ModelManager:
         Args:
             model: BaseModule
         """
+        # * 没有 place it to devices
+        # * set_func_decorator 会为模型类的方法动态添加装饰器
         self.set_func_decorator(model)
         model.finalize()
 
@@ -226,6 +236,7 @@ class ModelManager:
 
         dist_model = DistModel()
         for replica_id in range(model.num_replica):
+            # * 为每个 replica 创建一个 DistActor，即 MP 级别并行
             dist_actor = actor_type()(model, self.resouce_manager.gpu_per_node, self.error_signal, self._port_manager,
                                       replica_id, self._storage)
             dist_model.add_replica(dist_actor)
@@ -291,6 +302,14 @@ class ModelManager:
         return final_packs
 
     def place_gpu_models(self, gpu_models, env_list=None):
+        """
+        为需要 GPU 的模型分配 GPU，并创建 Actor
+        根据打包策略将模型放置在不同的 GPU 上
+        支持共置模型和非共置模型的混合管理
+        """
+        # * gpu_models 是一组共置模型
+        # * 创建一个大小 = max_gpu 的 placement_group 完全分配给这组模型
+        # * PG = [{GPU:gpu_per_node}, {GPU:gpu_per_node}, ..., {GPU:last gpus}]
         if not gpu_models:
             return
         max_gpu = max(m.total_gpu for m in gpu_models)
@@ -302,8 +321,9 @@ class ModelManager:
         for model in gpu_models:
             # TODO: for colocate gpu_per_process > 1, support later
             assert model.gpu_per_process == 1
+        # * 构建一个合适的共置方案，将可同时运行的模型打包为 pack，pack 内的模型其实是非共置的
         self.model_packs = self.find_model_packing_strategy(gpu_models, max_gpu)
-
+        # * 在同一个资源组但不在一个 pack 内的 model 需要使用相同的资源，设置 colocate models，真正的共置模型
         for model in gpu_models:
             pack = []
             for pack in self.model_packs:
@@ -316,6 +336,9 @@ class ModelManager:
             model.set_colocate_models(colocate_models)
 
         def _get_model_replica_from_pack(gpu_index, model_pack):
+            """
+            获取每个 gpu 对应的 replica，每个 pack 都可能有一个 replica
+            """
             gpu_offset = 0
             for model in model_pack:
                 if gpu_index < gpu_offset + model.total_gpu:
@@ -335,15 +358,21 @@ class ModelManager:
                     colocate_models.append(replica)
             gpu_to_replicas.append(colocate_models)
 
+        # * 为每个 GPU 的每个 Replica 创建对应的 actor
+        # * 每个 Replica 对应多个 actor
+        # * 每个 GPU 也对应多个 actor
         for i, replicas in enumerate(gpu_to_replicas):
+            # * 检查是第几个 PG(node)
             group = i // self.resouce_manager.gpu_per_node
             for replica in replicas:
+                # * 同一个 GPU 上的 replicas 是共置的，因此每个 replica 对应的 num_gpus 就是 1.0 / N
                 num_gpus = 1.0 / len(replicas)
                 if isinstance(replica.model, VLLMModuleV2) and replica.vllm_engine is None:
                     num_gpus = num_gpus / 2
                     replica.create_engine_actor(num_gpus, placement_group, group)
                     # we do not want to add engine actor to all_actors
                     replica.all_actors.pop()
+                # * 每个 gpu 上的每个 replica 都创建一个 actor
                 replica.create_actor(num_gpus, placement_group, group)
 
         models_to_revert = self._find_param_recv_models(gpu_models)
@@ -391,10 +420,12 @@ class ModelManager:
     def place_models_to_remote_devices(self, models, env_list=None):
         cpu_models = [model for model in models if model.total_gpu == 0]
         gpu_models = [model for model in models if model.total_gpu > 0]
+        # * 创建 ray actor 并分配 gpu
         self.place_gpu_models(gpu_models, env_list)
         self.place_cpu_models(cpu_models)
         for model in models:
             for replica in model.replicas:
+                # * 为 DistModel 注册控制 actor 关于 model(BaseModule) 的远程调用方法
                 replica.preprocess_actors()
 
     def _set_dist_env(self, model, reverse):

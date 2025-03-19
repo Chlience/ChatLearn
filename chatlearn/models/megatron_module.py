@@ -98,6 +98,7 @@ class MegatronModule(TorchModule):
             assert hasattr(self, "model")
             assert hasattr(self, "optimizer")
             assert hasattr(self, "opt_param_scheduler")
+            # * 创建训练内存管理器
             if self.module_args.offload_weights or self.module_args.free_grad_buffers or self.module_args.offload_optimizer_states:
                 self._memory_manager = create_trainer_memory_manager(
                     self.megatron_model(),
@@ -111,6 +112,7 @@ class MegatronModule(TorchModule):
         else:
             assert hasattr(self, "model")
             self.model.eval()
+            # * 创建推理内存管理器
             if self.module_args.offload_weights:
                 self._memory_manager = InferenceMemoryManager(
                     self.megatron_model(),

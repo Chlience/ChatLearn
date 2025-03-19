@@ -35,8 +35,8 @@ class Environment(Executor):
 
         Args
         ----
-        models : List[BaseModule]
-            a list of modules
+        flow : callable
+             a function that defines model computation flow
         """
         super().__init__(model_flow)
         self._batch_size = None
@@ -51,14 +51,20 @@ class Environment(Executor):
 
     def setup_dataset(self):
         self.data_producer = self.models[0]
+        # * 第一个一定是 policy model，以其 DP 为基准检查 sample_per_episode
         assert self.sample_per_episode % len(self.data_producer.replicas) == 0, \
             "replica number of data producer model must be divisible by sample_per_episode"
         logger.info("start set dataset for data_producer")
         refs = []
+        # * 批量生成排序
         if self.models[0].module_args.batch_generation.ranking:
             episode_per_epoch = math.ceil(len(self._dataset) / self.sample_per_episode)
             self._dataset = batch_generation_ranking(self._dataset, episode_per_epoch, self.sample_per_episode)
+        # * 为 replica 构建 dataloader
         for policy_replica in self.data_producer.replicas:
+            # ? 不同 replica 对同一个 dataset 构建 dataloader 会不会有问题？
+            # * 在 Sampler 引入了 data_parallel_rank 和 data_parallel_size 之后
+            # * 不同 replica 的 dataloader 访问的是同一个 dataset 的不同部分
             ref = policy_replica.master._build_dataloader.remote(self._dataset,
                                                                  self.batch_size)
             refs.append(ref)
@@ -66,9 +72,12 @@ class Environment(Executor):
         logger.info("set dataset for data_producer done")
 
     def setup(self):
+        # * 处理 flow
         super().setup()
+        # * 处理 dataset，分配给 replica
         self.setup_dataset()
 
+        # ? Padding 还没细看
         for model_node in self.model_flow.model_nodes:
             model = model_node.model.replicas[0]
             config = future.get(model.master.padding_config.remote())
@@ -144,13 +153,17 @@ class Environment(Executor):
     def execute(self, is_eval):
         data_queues, out_queue = self.setup_queues()
         data_producer_iter = cycle(iter(self.models[0].replicas))
+        # * 认为 models[0] 是 data_producer 的 master
         # prepare batches for all model replicas
         for mb in range(self.batch_per_episode):
             current_data_producer = next(data_producer_iter)
             query = current_data_producer.master.next_batch.remote(is_eval=is_eval)
+            # * 将 batch 在 episode 中的 index 与数据绑定并放入队列
             encoded_data = encode_data(mb, query)
+            # * 将数据分配给所有的 data_producer
             for data_queue in data_queues:
                 data_queue.put(encoded_data)
+        # * 开始计算过程
         self.compute_loop(out_queue)
         return out_queue
 

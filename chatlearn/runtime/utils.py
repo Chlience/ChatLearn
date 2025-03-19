@@ -68,6 +68,11 @@ class FlowParser:
                         self.parse_assign(line0)
 
     def parse(self, func):
+        # * global：指向全局变量
+        # * nonlocal：指向除了全局变量之外嵌套函数外中最接近的变量
+        # * local：指向函数内部声明的变量
+        # * 利用 inspect.getclosurevars(func) 获取函数的闭包变量
+        # * 使用 visit_FunctionDef 方法遍历函数定义，获取每个变量（模型）调用的函数
         closure_vars = inspect.getclosurevars(func)
         self.global_models = {}
         if closure_vars.globals:
@@ -76,6 +81,7 @@ class FlowParser:
             self.global_models.update(closure_vars.nonlocals)
         node_iter = ast.NodeVisitor()
         node_iter.visit_FunctionDef = self.visit_func
+        # * visit_FunctionDef 在发现函数定义时被调用
         if isinstance(func, str):
             code = textwrap.dedent(func)
         else:

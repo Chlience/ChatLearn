@@ -61,6 +61,8 @@ class PolicyReference(PolicyInference):
         self.args = get_args()
         # Set up model and load checkpoint
         model = get_model(self.model_provider, wrap_with_ddp=False)
+        # * 此时已经将 Model 分配到对应 GPU 上
+        # * Ray 通过 CUDA_VISIBLE_DEVICES 的方式实现 GPU 隔离
         self.tokenizer = get_tokenizer()
         if self.args.load:
             torch.distributed.barrier()
@@ -169,9 +171,12 @@ class PolicyReference(PolicyInference):
             elif get_args().trainer_engine in (TrainerEngine.RLHF, TrainerEngine.GRPO):
                 tokens = to_device("cuda", data["all_tokens"])
 
+                # * attention mask: 下三角
+                # * position ids: 生成 0 to seq-1 的序列
                 attention_mask, position_ids = get_ltor_masks_and_position_ids_rlhf(tokens)
 
                 # logits will be meanigful only in the last pipeline stage.
+                # * 利用 megatron 计算 logits
                 logits = forward_step_helper(self.model, tokens, position_ids, attention_mask)
 
                 if not self._parallel_output:
