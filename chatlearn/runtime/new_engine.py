@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Engine"""
+"""New Engine"""
 
-from time import sleep
+import inspect
 import torch
 
 from chatlearn.checkpoint.checkpoint_manager import CheckpointManager
 from chatlearn.data.data import StreamDataset
 from chatlearn.models.base_module import BaseModule
-from chatlearn.runtime.dist_actor import DistVLLMActor
-from chatlearn.runtime.environment import Environment
+from chatlearn.runtime.dist_actor import DistActor, DistModel, DistVLLMActor
+from chatlearn.runtime.model_node import ModelNode
+from chatlearn.runtime.stage import Environment, Trainer
 from chatlearn.runtime.evaluator import Evaluator
-from chatlearn.runtime.trainer import Trainer
-from chatlearn.schedule.model_manager import ModelManager
+from chatlearn.schedule.new_model_manager import ModelManager
 from chatlearn.schedule.resource_manager import ResourceManager
 from chatlearn.utils import future
 from chatlearn.utils.global_vars import get_args
@@ -32,11 +32,19 @@ from chatlearn.utils.logger import logger
 from chatlearn.utils.utils import get_full_proc_memory_info
 from chatlearn.utils.timer import Timers
 
+from chatlearn.schedule.task_manager import RLHFTaskManager
+from chatlearn.schedule.scheduler import RLHFScheduler
+from ray.util.queue import Queue
+from .utils import encode_data
+
 LOG_START = ">>>>>>>>>>>"
 
 
 class BaseEngine:
-    """Base Engine"""
+    """
+    New Base Engine
+    管理 local_models 和 remote_models
+    """
 
     def __init__(self, *models):
         self._models = models
@@ -89,8 +97,6 @@ class BaseEngine:
         logger.info(get_full_proc_memory_info('After model init'))
         # do not include compile dependencies in setup
         # if the program hang in setup, may try to set concurrent_setup to False.
-        # * initialize megatron model
-        # * 为 megatron 传递应有的参数
         if self.runtime_args.concurrent_setup:
             refs = []
             refs_val = []
@@ -100,6 +106,8 @@ class BaseEngine:
             future.wait(refs)
             future.wait(refs_val)
         else:
+            # * 真正的 model.setup
+            # * 调用 megatron 加载 checkpoint
             for model in self.remote_models:
                 future.wait(model.model_setup())
                 future.wait(model.validate())
@@ -113,7 +121,6 @@ class BaseEngine:
         for model in self.remote_models:
             future.get(model.after_episode())
 
-    # * 注意 models 即为 remote_models
     @property
     def models(self):
         return self.remote_models
@@ -222,16 +229,10 @@ class Engine(BaseEngine):
         self.named_models = {model.name: model for model in self.remote_models}
 
     def setup(self):
-        """ """
-        # * 调用 _create_remote_models
+        """
+        :meta private:
+        """
         super().setup()
-        self._executors = [self.env, self.trainer, self.evaluator]
-        for executor in self._executors:
-            if executor:
-                # * 将 remote_models 传递给 executor 替换原有的 models
-                executor.update_models(self.remote_models)
-        if self.env:
-            self.env.set_dataset(self._dataset)
         self.model_manager.build_parameter_group()
         self.model_manager.start_error_monitor()
 
@@ -282,7 +283,10 @@ class Engine(BaseEngine):
     def learn(self):
         self.timers("chatlearn").start()
         self.timers("setup").start()
+        # * setup Model/Resource Manager
+        # * setup Model
         self.setup()
+        # * setup excutor(env/trainer/evaluator)
         for executor in self._executors:
             if executor:
                 executor.setup()
@@ -348,6 +352,7 @@ class Engine(BaseEngine):
         self.timers("chatlearn").stop()
         logger.info(f"{LOG_START} {self._name} overall summary {self.timers.log(names=['chatlearn'])}")
         logger.info(f"train {self._name} done")
+        
 
     def _resume_from_data_checkpoint(self):
         if self.runtime_args.data_checkpoint_path:
@@ -402,7 +407,7 @@ class Engine(BaseEngine):
 
 
 class RLHFEngine(Engine):
-    """RLHFEngine"""
+    """New RLHFEngine"""
 
     def __init__(self,
                  policy: BaseModule,
@@ -411,165 +416,128 @@ class RLHFEngine(Engine):
                  value: BaseModule,
                  policy_trainer: BaseModule,
                  value_trainer: BaseModule):
-        def env_compute_flow(batch):
-            policy_out = policy.forward_step(batch)
-            ref_out = reference.forward_step(policy_out)
-            value_out = value.forward_step(policy_out)
-            reward_out = reward.forward_step(policy_out, ref_out, value_out)
-            return value_out, reward_out
-
-        def trainer_compute_flow(batch):
-            policy_trainer.train_step(batch)
-            value_trainer.train_step(batch)
-
-        env = Environment(env_compute_flow)
-        trainer = Trainer(trainer_compute_flow)
-        super().__init__(env, trainer, name='rlhf')
+        self._episode_size = None
+        self._batch_size = None
+        self._input_queue = Queue()
+        env = Environment(policy, reference, reward, value)
+        trainer = Trainer(policy_trainer, value_trainer)
+        super().__init__(environment=env, trainer=trainer, name='rlhf')
         self.set_parameter_sync(policy_trainer, policy)
         self.set_parameter_sync(value_trainer, value)
-
-
-class OnlineDPOEngine(Engine):
-    """Online DPO Engine."""
-    def __init__(self,
-                 policy: BaseModule,
-                 reference: BaseModule,
-                 reward: BaseModule,
-                 policy_trainer: BaseModule):
-        def env_compute_flow(batch):
-            policy_out = policy.forward_step(batch)
-            ref_out = reference.forward_step(policy_out)
-            reward_out = reward.forward_step(policy_out, ref_out)
-            return reward_out
-
-        def trainer_compute_flow(batch):
-            policy_trainer.train_step(batch)
-
-        env = Environment(env_compute_flow)
-        trainer = Trainer(trainer_compute_flow)
-        super().__init__(env, trainer, name='online_dpo')
-        self.set_parameter_sync(policy_trainer, policy)
-
-
-class DPOEngine(Engine):
-    """DPO Engine."""
-    def __init__(self,
-                 reference: BaseModule,
-                 policy_trainer: BaseModule):
-        def env_compute_flow(batch):
-            ref_out = reference.forward_step(batch)
-            return ref_out
-
-        def trainer_compute_flow(batch):
-            policy_trainer.train_step(batch)
-
-        env = Environment(env_compute_flow)
-        trainer = Trainer(trainer_compute_flow)
-        super().__init__(env, trainer, name='dpo')
-
-
-class GRPOEngine(Engine):
-    """GRPO Engine."""
-    def __init__(self,
-                 policy: BaseModule,
-                 reference: BaseModule,
-                 reward: BaseModule,
-                 policy_trainer: BaseModule):
-        def env_compute_flow(batch):
-            policy_out = policy.forward_step(batch)
-            ref_out = reference.forward_step(policy_out)
-            reward_out = reward.forward_step(policy_out, ref_out)
-            return reward_out
-
-        def trainer_compute_flow(batch):
-            policy_trainer.train_step(batch)
-
-        env = Environment(env_compute_flow)
-        trainer = Trainer(trainer_compute_flow)
-        super().__init__(env, trainer, name='grpo')
-        self.set_parameter_sync(policy_trainer, policy)
-
-
-class GRPOMathEngine(Engine):
-    """GRPO Engine with math reward"""
-    def __init__(self,
-                 policy,
-                 reference,
-                 reward,
-                 reward1,
-                 ppo_policy):
-
-        def env_compute_flow(batch):
-            policy_out = policy.forward_step(batch)
-            ref_out = reference.forward_step(policy_out)
-            reward_out = reward.forward_step(policy_out, ref_out)
-            reward_out1 = reward1.forward_step(batch, policy_out)
-            return reward_out, reward_out1
-
-        def trainer_compute_flow(batch):
-            ppo_policy.train_step(batch)
-
-        def evaluator_flow(batch):
-            policy_out = policy.eval_forward(batch)
-            reward_out = reward.eval_forward(policy_out)
-            reward_out1 = reward1.eval_forward(policy_out)
-            return reward_out, reward_out1
-
-        env = Environment(env_compute_flow)
-        trainer = Trainer(trainer_compute_flow)
-        evaluator = Evaluator(evaluator_flow)
-        super().__init__(env, trainer, evaluator, name='grpo_math')
-        self.set_parameter_sync(ppo_policy, policy)
-
-
-class EvalEngine(Engine):
-    """Evaluation Engine"""
-
-    def __init__(self, eval_flow=None, evaluator=None):
-        if evaluator is None:
-            evaluator = Evaluator(eval_flow)
-        super().__init__(evaluator=evaluator)
-
+        self.scheduler = RLHFScheduler()
+    
     def setup(self):
+        # * 将在 remote 部分将 model name 加入到属性，指向 DistModel
+        # * DistModel.model 指向原 MegatronModule
         super().setup()
-        self.evaluator.set_dataset(self._dataset)
-        self.evaluator.set_timers(self.timers)
-        self.evaluator.set_post_process_func(self._post_process_func)
-
+        self.setup_dataloader()
+        self.setup_model_node()
+        
     def set_dataset(self, dataset):
-        """
-        Set prompt dataset.
-
-        Args
-        ----
-        dataset : list
-            a list of prompt string
-        """
         self._dataset = dataset
         return self
-
-    def set_post_process_func(self, post_process_func):
-        """
-        Set post process function.
-
-        Args
-        ----
-        post_process_func
-            This function accept two arguments.
-            1. results: a list of evaluation results
-            2. eval_info: a dict meta that contains "train_iteration" and "episode_iteration"
-        """
-        self._post_process_func = post_process_func
+        
+    def set_batch_size(self, batch_size):
+        self._batch_size = batch_size
         return self
+    
+    @property
+    def episode_size(self):
+        if self._episode_size is not None:
+            return self._episode_size
+        return self.runtime_args.sample_per_episode
+    
+    @property
+    def batch_size(self):
+        if self._batch_size is not None:
+            return self._batch_size
+        return self.runtime_args.generation_batch_size
+    
+    @property
+    def batch_per_episode(self):
+        return self.episode_size // self.batch_size
 
-    def eval(self, cur_iter=None, train_iteration=None):
+    def setup_dataloader(self):
+        self._data_loader = self.policy.model.build_dataloader(self._dataset, self.batch_size)
+        self.data_iter = iter(self._data_loader)
+    
+    def setup_model_node(self):
+        """根据 RHLF 的特性设置 Input Queue 和 Output Queue
+        只设置了 Env 部分的输入输出
         """
-        Start evaluating.
-        """
+        # TODO policy_trainer / value_trainer
+        
+        self.policy.node = ModelNode(self.policy)
+        self.reference.node = ModelNode(self.reference)
+        self.value.node = ModelNode(self.value)
+        self.reward.node = ModelNode(self.reward)
+        
+        policy2refernece = Queue()
+        policy2value = Queue()
+        policy2reward = Queue()
+        reference2reward = Queue()
+        value2reward = Queue()
+        
+        self.policy.node.set_output_queues([policy2refernece, policy2value, policy2reward])
+        self.reference.node.set_output_queues([reference2reward])
+        self.value.node.set_output_queues([value2reward])
+        self.policy.node.set_input_queues([self._input_queue])
+        self.reference.node.set_input_queues([policy2refernece])
+        self.value.node.set_input_queues([policy2value])
+        self.reward.node.set_input_queues([policy2reward, reference2reward, value2reward])
+
+    def generate_one_step_one_model_internal(self, model_node:ModelNode, replica:DistActor, func_name='forward_step'):
+        output = []
+        mb, query = model_node.get_batch()
+        for actor in replica.all_actors:
+            ret = replica.call_actor_remote_func(actor, func_name, *query)
+            output.append((mb, ret))
+            # ? 为什么要写 ret, mb？
+        return output
+        
+    def generate_one_step_one_model(self, model_node:ModelNode, replica:DistActor, func_name='forward_step'):
+        outpout = self.generate_one_step_one_model_internal(model_node, replica, func_name)
+        
+    def compute_one_step_one_model(self, model:DistModel):
+        model.node.get_input_data()
+        for replica in model.replicas:
+            self.generate_one_step_one_model(model.node, replica, func_name='forward_step')
+    
+    def compute_loop(self):
+        while(True):
+            # TODO Scheduler DO SOMETHING
+            if self.scheduler.is_stopped():
+                break
+            for model in self.models:
+                self.compute_one_step_one_model(model)
+            break
+    
+    def learn(self):
+        self.timers("chatlearn").start()
+        self.timers("setup").start()
         self.setup()
-        self.evaluator.setup()
-        self.timers("episode").start()
-        results = self.evaluator.eval(
-            cur_iter=cur_iter, train_iteration=train_iteration)
-        self.timers("episode").stop()
-        return results
+        self.timers("setup").stop()
+        
+        for episode_id in range(self._start_episode, self.runtime_args.num_episode):
+            # * 1. Run Episode
+            # * 2. Parameter Sync
+            # * 3. Save Checkpoint
+            self.timers("episode").start()
+            logger.info(f"start train episode_id: {episode_id + 1}/{self.runtime_args.num_episode}")
+            for mb in range(self.batch_per_episode):
+                query = next(self.data_iter)
+                encoded_data = encode_data(mb, query)
+                self._input_queue.put(encoded_data)
+            self.compute_loop()
+            logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} done")
+            self.timers("sync_parameters").start()
+            # * fake sync
+            # self.model_manager.sync_parameters(episode_id + 1)
+            self.timers("sync_parameters").stop()
+            logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} parameter sync done")
+            self.timers("episode").stop()
+            self.logging_summary(episode_id)
+            self.save_checkpoint(episode_id)
+        
+        self.timers("chatlearn").stop()
+        logger.info(f"{LOG_START} {self._name} overall summary {self.timers.log(names=['chatlearn'])}")

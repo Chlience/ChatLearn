@@ -147,5 +147,5 @@ vocab_file=${DATA_DIR}/gpt2-vocab.json \
 merge_file=${DATA_DIR}/gpt2-merges.txt \
 enable_lora_value=${lora} \
 enable_lora_policy=${lora} \
-python entry/train_rlhf.py -c ${config_dir}/gpt/rlhf.yaml 2>&1 | tee ${output_dir}/log_${RANK}.log ; exit ${PIPESTATUS[0]}
-# python -m debugpy --listen 5678 --wait-for-client entry/train_rlhf.py -c ${config_dir}/gpt/rlhf.yaml 2>&1 | tee ${output_dir}/log_${RANK}.log ; exit ${PIPESTATUS[0]}
+python  /app/tests/test_new_rlhf.py -c ${config_dir}/gpt/rlhf.yaml 2>&1 | tee ${output_dir}/log_${RANK}.log ; exit ${PIPESTATUS[0]}
+# python -m debugpy --listen 5678 --wait-for-client /app/tests/test_new_rlhf.py -c ${config_dir}/gpt/rlhf.yaml 2>&1 | tee ${output_dir}/log_${RANK}.log ; exit ${PIPESTATUS[0]}

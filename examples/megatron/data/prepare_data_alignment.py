@@ -23,7 +23,8 @@ from tqdm import tqdm
 
 while True:
     try:
-        alignment_data = load_dataset('Dahoas/full-hh-rlhf')
+        # alignment_data = load_dataset('Dahoas/full-hh-rlhf')
+        alignment_data = load_dataset("parquet", data_dir="/app/data/full-hh-rlhf/data")
         break
     except Exception as e:
         print(e)
