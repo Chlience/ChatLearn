@@ -161,7 +161,7 @@ class ModelManager:
                 future.wait(refs)
 
     def set_func_decorator(self, model):
-        """ 为模型类的方法动态添加装饰器 """
+        """ 为模型类的方法动态添加装饰器，call_funcs 是在计算流中调用过的方法 """
         if is_decorated(model.name):
             return
         call_funcs = model.call_funcs
@@ -183,13 +183,11 @@ class ModelManager:
 
     def _to_dist_model(self, model):
         """
-        Convert one model to DistActor and place it to devices
+        Convert one model to DistActor
 
         Args:
             model: BaseModule
         """
-        # * 没有 place it to device
-        # * set_func_decorator 会为模型类的方法动态添加装饰器
         self.set_func_decorator(model)
         model.finalize()
         dist_model = DistModel(model)
