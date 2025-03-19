@@ -224,7 +224,6 @@ class Engine(BaseEngine):
         self.model_manager = ModelManager(self._models, resource_manager, self.global_args)
         for src_model, dst_model in self._param_sync_pairs:
             self.model_manager.set_parameter_sync(src_model, dst_model)
-        print(">>> self.model_manager.remote()")
         self.model_manager.remote()
         self.remote_models = self.model_manager.dist_models
         self.named_models = {model.name: model for model in self.remote_models}
@@ -234,8 +233,8 @@ class Engine(BaseEngine):
         :meta private:
         """
         super().setup()
-        self.model_manager.build_parameter_group()
-        self.model_manager.start_error_monitor()
+        # self.model_manager.build_parameter_group()
+        # self.model_manager.start_error_monitor()
 
     def set_dataset(self, dataset):
         """
@@ -475,6 +474,8 @@ class RLHFEngine(Engine):
         self.reference.node = ModelNode(self.reference)
         self.value.node = ModelNode(self.value)
         self.reward.node = ModelNode(self.reward)
+        self.ppo_policy.node = ModelNode(self.ppo_policy)
+        self.ppo_value.node = ModelNode(self.ppo_value)
         
         policy2refernece = Queue()
         policy2value = Queue()
@@ -517,6 +518,16 @@ class RLHFEngine(Engine):
             # TODO Scheduler DO SOMETHING
             if self.scheduler.is_stopped():
                 break
+            # TODO 目前写死 scheduler add_replica
+            self.timers("add_replica").start()
+            self.model_manager.add_replica(name="policy", num_gpus=0.1)
+            self.timers("add_replica").stop()
+            self.timers("add_replica").start()
+            self.model_manager.add_replica(name="policy", num_gpus=0.1)
+            self.timers("add_replica").stop()
+            self.timers("add_replica").start()
+            self.model_manager.add_replica(name="policy", num_gpus=0.1)
+            self.timers("add_replica").stop()
             for model in self.models:
                 self.compute_one_step_one_model(model)
             break
@@ -545,8 +556,9 @@ class RLHFEngine(Engine):
             self.timers("sync_parameters").stop()
             logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} parameter sync done")
             self.timers("episode").stop()
-            self.logging_summary(episode_id)
-            self.save_checkpoint(episode_id)
+            break
+            # self.logging_summary(episode_id)
+            # self.save_checkpoint(episode_id)
         
         self.timers("chatlearn").stop()
-        logger.info(f"{LOG_START} {self._name} overall summary {self.timers.log(names=['chatlearn'])}")
+        logger.info(f"{LOG_START} {self._name} overall summary {self.timers.log(names=['chatlearn', 'add_replica'])}")

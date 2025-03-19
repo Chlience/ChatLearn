@@ -311,30 +311,30 @@ class DistModel:
 
     def __init__(self, model=None):
         self.replicas = []
-        self.name = None
         self.rank_to_actors = {}
         self.register_func()
         self._is_colocate = False
         self._colocate_models = []
         self._model = model
+        self.name = model.name
+        self.node = None
 
     def add_replica(self, replica):
         self.replicas.append(replica)
-        self.name = replica.name
-        
+
     @property
     def model(self):
         if self._model is not None:
             return self._model
-        return self.replicas[0].model
+        return self.model
 
     @property
     def trainable(self):
-        return self.replicas[0].trainable
+        return self.model.trainable
 
     @property
     def module_args(self):
-        return self.replicas[0].module_args
+        return self.model.module_args
 
     @property
     def actor_num(self):
@@ -346,19 +346,19 @@ class DistModel:
 
     @property
     def total_gpu(self):
-        return self.replicas[0].total_gpu
+        return self.model.total_gpu
 
     @property
     def total_cpu(self):
-        return self.replicas[0].total_cpu
+        return self.model.total_cpu
 
     @property
     def num_gpu_per_replica(self):
-        return self.replicas[0].num_gpu_per_replica
+        return self.model.num_gpu_per_replica
 
     @property
     def gpu_per_process(self):
-        return self.replicas[0].gpu_per_process
+        return self.model.gpu_per_process
 
     @property
     def is_colocate(self):

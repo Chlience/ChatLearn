@@ -71,13 +71,7 @@ class ModelManager:
             dist_model = self._to_dist_model(model)
             self.dist_models.append(dist_model)
             self._name2distmodel[model.name] = dist_model
-            
-            # * [TEST] 在此处将所有 Replica 全部创建
-            for _ in range(model.num_replica):
-                # * 为每个 replica 创建一个 DistActor，即 MP 级别并行
-                # * [TEST] 将 GPU 数量设置为 0，实际的 GPU 由 Schedule 管理
-                self.add_replica(model, 1 / 6)
-        
+
         # ! 在参数同步时，可能会触发 NCCL Error，详见 model_manager.py
         # ! 放置 GPU 有特殊策略
         
@@ -208,20 +202,20 @@ class ModelManager:
                     models_to_revert.append(model)
         return models_to_revert
 
-    def add_replica(self, model, num_gpus):
+    def add_replica(self, name, num_gpus):
         """
         Add a replica to the model
         """
-        dist_model = self._name2distmodel[model.name]
+        dist_model = self._name2distmodel[name]
         
         def actor_type():
-            if isinstance(model, VLLMModuleV2):
+            if isinstance(dist_model.model, VLLMModuleV2):
                 return DistVLLMActor
-            if isinstance(model, TorchModule):
+            if isinstance(dist_model.model, TorchModule):
                 return DistTorchActor
             return DistActor
         
-        dist_actor = actor_type()(model, self.resouce_manager.gpu_per_node, self.error_signal, self._port_manager,
+        dist_actor = actor_type()(dist_model.model, self.resouce_manager.gpu_per_node, self.error_signal, self._port_manager,
                                   replica_id=0, storage=self._storage)
         dist_model.add_replica(dist_actor)
         dist_actor.create_actor_without_group(num_gpus)
