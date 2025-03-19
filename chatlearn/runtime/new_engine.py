@@ -35,7 +35,7 @@ from chatlearn.utils.timer import Timers
 from chatlearn.schedule.task_manager import RLHFTaskManager
 from chatlearn.schedule.scheduler import RLHFScheduler
 from ray.util.queue import Queue
-from .utils import encode_data
+from .utils import encode_data, decode_data
 
 LOG_START = ">>>>>>>>>>>"
 
@@ -224,6 +224,7 @@ class Engine(BaseEngine):
         self.model_manager = ModelManager(self._models, resource_manager, self.global_args)
         for src_model, dst_model in self._param_sync_pairs:
             self.model_manager.set_parameter_sync(src_model, dst_model)
+        print(">>> self.model_manager.remote()")
         self.model_manager.remote()
         self.remote_models = self.model_manager.dist_models
         self.named_models = {model.name: model for model in self.remote_models}
@@ -419,6 +420,9 @@ class RLHFEngine(Engine):
         self._episode_size = None
         self._batch_size = None
         self._input_queue = Queue()
+        # * 设置计算中需要调用的方法
+        for model in [policy, reference, reward, value, policy_trainer, value_trainer]:
+            model.call_funcs = ["forward_step"]
         env = Environment(policy, reference, reward, value)
         trainer = Trainer(policy_trainer, value_trainer)
         super().__init__(environment=env, trainer=trainer, name='rlhf')
@@ -488,15 +492,20 @@ class RLHFEngine(Engine):
 
     def generate_one_step_one_model_internal(self, model_node:ModelNode, replica:DistActor, func_name='forward_step'):
         output = []
-        mb, query = model_node.get_batch()
+        mb, query = decode_data(model_node.get_batch())
+        kwargs = {}
+        # ? 在跑前 Load 参数 or 在创建时 Load 参数
+        # * 目前只做 1 个 Step 所以不需要考虑 Relaod
+        kwargs["to_onload"] = True
         for actor in replica.all_actors:
-            ret = replica.call_actor_remote_func(actor, func_name, *query)
+            # * 调用 actor 的远程函数 forward_step
+            # * preprocess_compute 将处理 input/output 和传入的参数
+            ret = replica.call_actor_remote_func(actor, func_name, *query, **kwargs)
             output.append((mb, ret))
-            # ? 为什么要写 ret, mb？
         return output
         
     def generate_one_step_one_model(self, model_node:ModelNode, replica:DistActor, func_name='forward_step'):
-        outpout = self.generate_one_step_one_model_internal(model_node, replica, func_name)
+        output = self.generate_one_step_one_model_internal(model_node, replica, func_name)
         
     def compute_one_step_one_model(self, model:DistModel):
         model.node.get_input_data()

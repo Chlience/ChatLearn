@@ -28,14 +28,15 @@ class ModelNode:
         for queue_id, input_queue in enumerate(self._input_queues):
             while input_queue.qsize() != 0:
                 mb, data = decode_data(input_queue.get())
-                self._input_dict.update_input_data(mb, queue_id, data)
+                self.update_input_data(mb, queue_id, data)
     
     def update_input_data(self, mb, queue_id, data):
         if self._input_dict.get(mb) is None:
             self._input_dict[mb] = {}
         self._input_dict[mb][queue_id] = data
         if (len(self._input_dict[mb]) == len(self._input_queues)):
-            self._queue.put(encode_data(mb, self.model(self._input_dict[mb])))
+            data_list = [self._input_dict[mb].get(i) for i in range(len(self._input_queues))]
+            self._queue.put(encode_data(mb, data_list))
             del self._input_dict[mb]
 
     def get_batch(self, encode=True):
