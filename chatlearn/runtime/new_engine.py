@@ -97,6 +97,9 @@ class BaseEngine:
         logger.info(get_full_proc_memory_info('After model init'))
         # do not include compile dependencies in setup
         # if the program hang in setup, may try to set concurrent_setup to False.
+        # TODO model_setup 将会为所有 model 进行初始化（已分配好并行参数从而有选择的初始化）
+        # TODO 此时需要保证 replicas 已经成功建立
+        # TODO 需要将初始化过程移动到 replicas 的初始化过程中
         if self.runtime_args.concurrent_setup:
             refs = []
             refs_val = []
