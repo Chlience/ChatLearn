@@ -218,9 +218,17 @@ class ModelManager:
         dist_actor = actor_type()(dist_model.model, self.resouce_manager.gpu_per_node, self.error_signal, self._port_manager,
                                   replica_id=0, storage=self._storage)
         dist_model.add_replica(dist_actor)
+        import time
+        t1 = time.time()
         dist_actor.create_actor_without_group(num_gpus)
+        t2 = time.time()
+        # * 为 DistActor 设置对 Ray.actor 的远程调用
         dist_actor.preprocess_actors()
+        t3 = time.time()
+        # TODO 设置分布式环境，需修改
         dist_actor.set_dist_env()
+        t4 = time.time()
+        print(f"create_actor_without_group: {t2-t1}s, preprocess_actors: {t3-t2}s, set_dist_env: {t4-t3}s")
 
     def _set_dist_env(self, model, reverse):
         for replica in model.replicas:

@@ -220,7 +220,7 @@ class DistTorchActor(DistActor):
         return ordered_actors
 
     def set_dist_env(self, revert_placement=False):
-        self.all_actors = self.reorder_actors(self.all_actors, revert_placement)
+        # self.all_actors = self.reorder_actors(self.all_actors, revert_placement)
         master_addr = future.get(self.master.get_address.remote())
         master_port = future.get(self._port_manager.get_free_port.remote(master_addr))
 
@@ -401,6 +401,7 @@ class DistModel:
             setattr(self, func_name, dist_call)
 
     def call_replica_func(self, func, *args, **kwargs):
+        print(f"DistModel({self.name}) call_replica_func: {func}, num of impacted replicas: {len(self.replicas)}")
         refs = []
         for dist_actor in self.replicas:
             ref = getattr(dist_actor, func)(*args, **kwargs)
