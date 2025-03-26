@@ -127,20 +127,8 @@ class DistActor:
         self.all_actors.append(actor)
         return actor
 
-    def _create_actor_without_group(self, cls, num_gpus, **kwargs):
-        # use max_concurrency=1 to make sure only one task execute at one time
-        actor = ray.remote(num_gpus=num_gpus, num_cpus=0)(cls) \
-            .remote(self.model.name, self.model.global_args, self.replica_id, **kwargs)
-        actor.set_error_signal.remote(self.error_signal)
-        actor.set_storage.remote(self.storage)
-        self.all_actors.append(actor)
-        return actor
-
     def create_actor(self, num_gpus, placement_group, group_index):
         return self._create_actor(self.model.__class__, num_gpus, placement_group, group_index)
-    
-    def create_actor_without_group(self, num_gpus):
-        return self._create_actor_without_group(self.model.__class__, num_gpus)
 
     def _setup_collective_group(self, rank_offset, world_size, group_name, backend="nccl"):
         refs = []
@@ -220,7 +208,7 @@ class DistTorchActor(DistActor):
         return ordered_actors
 
     def set_dist_env(self, revert_placement=False):
-        # self.all_actors = self.reorder_actors(self.all_actors, revert_placement)
+        self.all_actors = self.reorder_actors(self.all_actors, revert_placement)
         master_addr = future.get(self.master.get_address.remote())
         master_port = future.get(self._port_manager.get_free_port.remote(master_addr))
 
@@ -309,32 +297,25 @@ class DistVLLMActor(DistTorchActor):
 class DistModel:
     """DistModel"""
 
-    def __init__(self, model=None):
+    def __init__(self):
         self.replicas = []
+        self.name = None
         self.rank_to_actors = {}
         self.register_func()
         self._is_colocate = False
         self._colocate_models = []
-        self._model = model
-        self.name = model.name
-        self.node = None
 
     def add_replica(self, replica):
         self.replicas.append(replica)
-
-    @property
-    def model(self):
-        if self._model is not None:
-            return self._model
-        return self.model
+        self.name = replica.name
 
     @property
     def trainable(self):
-        return self.model.trainable
+        return self.replicas[0].trainable
 
     @property
     def module_args(self):
-        return self.model.module_args
+        return self.replicas[0].module_args
 
     @property
     def actor_num(self):
@@ -346,19 +327,19 @@ class DistModel:
 
     @property
     def total_gpu(self):
-        return self.model.total_gpu
+        return self.replicas[0].total_gpu
 
     @property
     def total_cpu(self):
-        return self.model.total_cpu
+        return self.replicas[0].total_cpu
 
     @property
     def num_gpu_per_replica(self):
-        return self.model.num_gpu_per_replica
+        return self.replicas[0].num_gpu_per_replica
 
     @property
     def gpu_per_process(self):
-        return self.model.gpu_per_process
+        return self.replicas[0].gpu_per_process
 
     @property
     def is_colocate(self):
@@ -397,11 +378,9 @@ class DistModel:
                           "set_src_parameter_model",
                           "set_colocate"]:
             dist_call = partial(self.call_replica_func, func_name)
-            # * 动态注册方法，使得对于 func_name 的调用转化为对于 call_replica_func(func_name) 的调用，以对应分布式场景。
             setattr(self, func_name, dist_call)
 
     def call_replica_func(self, func, *args, **kwargs):
-        print(f"DistModel({self.name}) call_replica_func: {func}, num of impacted replicas: {len(self.replicas)}")
         refs = []
         for dist_actor in self.replicas:
             ref = getattr(dist_actor, func)(*args, **kwargs)
