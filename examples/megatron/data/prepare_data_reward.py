@@ -24,7 +24,7 @@ from tqdm import tqdm
 while True:
     try:
         # rm_data = load_dataset('Dahoas/rm-static')
-        rm_data = load_dataset("parquet", data_dir="/app/data/rm-static/data")
+        rm_data = load_dataset("parquet", data_dir="/app/data/Dahoas/rm-static/data")
         break
     except Exception as e:
         print(e)
