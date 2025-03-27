@@ -112,7 +112,7 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
             seed = self.model_args.get("seed", 0) + self.replica_id
         else:
             seed = self.model_args.get("seed", 0)
-
+        # * LLM __init__
         engine_args = EngineArgs(
             model=self.model_args.get("tokenizer"),
             tokenizer=self.model_args.get("tokenizer"),
@@ -134,7 +134,7 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
             enforce_eager=self.model_args.get("enforce_eager", True),
             disable_custom_all_reduce=True
         )
-
+        # * LLMEngine __init__
         self.quant_config = None
         self.pipeline_layer_offset = None
         if CURRENT_VLLM_VERSION == VLLMVersion.v_0_3_0:
@@ -189,6 +189,7 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                     is_driver_worker=True,
                 )
             else:
+                # * Worker __init__
                 self.worker = Worker(
                     self.model_config,
                     self.parallel_config,
@@ -283,6 +284,9 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
         self.parallel_config.rank = torch.distributed.get_rank()
 
     def build_scheduler(self):
+        """
+        scheduler, output_processor, input_preprocessor
+        """
         self.seq_counter = Counter()
         if CURRENT_VLLM_VERSION == VLLMVersion.v_0_3_0:
             if self.scheduler is None:
@@ -301,7 +305,8 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                             self.parallel_config.pipeline_parallel_size)
                     for _ in range(self.parallel_config.pipeline_parallel_size)
                 ]
-
+                
+                # * output_processor
                 def get_tokenizer_for_seq(sequence):
                     tokenizer_group = self.get_tokenizer_group()
                     assert tokenizer_group, ("tokenizer_group cannot be None, "
@@ -323,6 +328,9 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                             tokenizer_for_seq,
                         ),
                     ))
+                # * input_processor
+                # * + 杂七杂八的东西：
+                # * cached_scheduler_outputs, scheduler_contexts, use_cached_outputs, process_request_outputs_callback, tracer
                 if CURRENT_VLLM_VERSION == VLLMVersion.v_0_6_3:
                     self.input_preprocessor = InputPreprocessor(self.model_config,
                                                                 self.tokenizer)
@@ -338,6 +346,7 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                     self.process_request_outputs_callback = None
                     self.tracer = None
             else:
+                # ? 手动 scheduler __init__ 
                 if CURRENT_VLLM_VERSION == VLLMVersion.v_0_6_3:
                     version = "selfattn"
                     if (self.scheduler_config.embedding_mode
@@ -469,6 +478,10 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
         return self._add_request_internal(data[prompt_key], data[input_ids_key], is_eval=is_eval)
 
     def _add_request_internal(self, prompt_list, prompt_token_id_list, is_eval=False):
+        """类似于 LLM.generate 中的数据处理及加入调度器
+        注意 prompt_token_id_list 在 v0.6.5 版本中已被弃用
+        > @deprecated("'prompt_token_ids' will become part of 'prompts'")
+        """
         if self._need_to_reset_scheduler:
             self._reset_scheduler()
         self.reset_vllm()
@@ -651,22 +664,38 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
         return self.model_config.hf_config.num_hidden_layers
 
     def generate_vllm(self, query, is_eval):
+        """
+        inference 将调用该函数
+        仿 LLMEngine.step()
+
+        Args:
+            query (_type_): _description_
+            is_eval (bool): _description_
+
+        Returns:
+            _type_: _description_
+        """
+        # * 初始化缓存和调度器
         num_gpu_blocks, num_cpu_blocks = self.profile_cache_blocks()
         num_blocks = torch.tensor([num_gpu_blocks, num_cpu_blocks], device='cuda')
         torch.distributed.all_reduce(num_blocks, op=torch.distributed.ReduceOp.MIN)
         min_gpu_blocks = num_blocks[0].item()
         min_cpu_blocks = num_blocks[1].item()
         self.set_cache_config(min_gpu_blocks, min_cpu_blocks)
+        # * 调度器只存在于 last_rank
         if self.is_last_rank():
             self.build_scheduler()
+        # * 重置缓存引擎
         self.reinit_cache_engine()
         # add requests of current episode to vllm scheduler
+        # * 将当前请求加入到调度器中
         if self.is_last_rank():
             self._add_request(query, is_eval=is_eval)
-
+        # * 执行推理
         step_outputs = True
         while step_outputs:
             schedule_query = None
+            # * 对于 last_rank，执行调度器，生成 schedule_query
             if self.is_last_rank():
                 # support multi step schedule.
                 virtual_engine = 0
@@ -712,7 +741,9 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                         self._process_model_outputs(ctx=ctx)
 
             schedule_query = broadcast_var_object_dict(schedule_query, torch.distributed.get_world_size()-1)
+            # * 真正执行
             output = self.execute_step(schedule_query)
+            # ? 自定义调整输出，和分布式有关
             if self.is_last_rank():
                 step_outputs = bool(output)
                 signal_tensor = torch.tensor(step_outputs, device='cuda')
@@ -854,6 +885,7 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                 if len(data) > 0:
                     # For llm_engine, there is no pipeline parallel support, so the engine
                     # used is always 0.
+                    # * 不能有 PP
                     virtual_engine = 0
 
                     # These are cached outputs from previous iterations. None if on first
@@ -885,6 +917,9 @@ class VLLMModule(TorchModule, LLMEngine, LLM):
                     if allow_async_output_proc:
                         execute_model_req.async_callback = self.async_callbacks[
                             virtual_engine]
+                    # * 此处本应该是 run_works，但是这里有自己的调度方案，故直接调用 worker
+                    # ? 如何实现的 TP 通信？
+                    # ? 是否只需要知道 master ip 和 master port 就好了，or just allreduce？
                     output = self.worker.execute_model(execute_model_req=execute_model_req)
                 else:
                     # No outputs in this case

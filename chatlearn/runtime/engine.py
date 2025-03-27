@@ -331,6 +331,7 @@ class Engine(BaseEngine):
             logger.info(f"start train episode_id: {episode_id + 1}/{self.runtime_args.num_episode}")
             if self.env.timers is None:
                 self.env.set_timers(self.timers)
+            self.env.make_experiences()
             queue = self.env.make_experiences()
             self.timers("set_train_dataset").start()
             refs = data_loader.set_dataset.remote(queue, episode_id, self._relay_sample_fn,
@@ -431,15 +432,16 @@ class RLHFEngine(Engine):
             reward_out = reward.forward_step(policy_out, ref_out, value_out)
             return value_out, reward_out
 
-        def trainer_compute_flow(batch):
-            policy_trainer.train_step(batch)
-            value_trainer.train_step(batch)
+        # def trainer_compute_flow(batch):
+        #     policy_trainer.train_step(batch)
+        #     value_trainer.train_step(batch)
 
         env = Environment(env_compute_flow)
-        trainer = Trainer(trainer_compute_flow)
-        super().__init__(env, trainer, name='rlhf')
-        self.set_parameter_sync(policy_trainer, policy)
-        self.set_parameter_sync(value_trainer, value)
+        # trainer = Trainer(trainer_compute_flow)
+        super().__init__(env, name='rlhf')
+        # super().__init__(env, trainer, name='rlhf')
+        # self.set_parameter_sync(policy_trainer, policy)
+        # self.set_parameter_sync(value_trainer, value)
 
 
 class OnlineDPOEngine(Engine):

@@ -42,6 +42,32 @@ export data_checkpoint_path=${output_dir}/data_checkpoint
 
 
 if [[ "$model_size" == "llama2-7B" ]]; then
+    [ -z "$policy_tp" ] && export policy_tp=1
+    [ -z "$policy_pp" ] && export policy_pp=1
+    [ -z "$ppo_policy_tp" ] && export ppo_policy_tp=1
+    [ -z "$ppo_policy_pp" ] && export ppo_policy_pp=1
+    [ -z "$reward_tp" ] && export reward_tp=1
+    [ -z "$ppo_value_pp" ] && export ppo_value_pp=1
+    export train_global_batch_size=128
+    if [[ "$backend" == "megatron" ]]; then
+        export generation_batch_size=256
+    elif [[ "$backend" == "vllm" ]]; then
+        export generation_batch_size=512
+    fi
+    export ref_generation_batch_size=64
+    export value_generation_batch_size=64
+    export reward_generation_batch_size=64
+    export train_micro_batch_size=16
+    export max_num_batched_tokens=65536
+    export gpu_memory_utilization=0.9
+    export num_gpu_ref=1
+    export num_gpu_value=1
+    export num_gpu_ppo_policy=1
+    export num_gpu_ppo_value=1
+    export free_memory_reward=True
+    export free_memory_ppo_policy=True
+    export free_memory_ppo_value=True
+elif [[ "$model_size" == "llama2-7B" ]]; then
     [ -z "$policy_tp" ] && export policy_tp=4
     [ -z "$policy_pp" ] && export policy_pp=1
     [ -z "$ppo_policy_tp" ] && export ppo_policy_tp=4
@@ -115,4 +141,5 @@ num_gpu=${num_gpu} \
 data_path=${DATASET_PATH} \
 eval_data_path=${EVAL_DATASET_PATH} \
 sample_per_episode=${sample_per_episode} \
-python entry/train_rlhf.py -c $configs 2>&1 | tee -a ${log_file} ; exit ${PIPESTATUS[0]}
+python entry/train_rlhf.py -c $configs 2>&1 | tee ${log_file} ; exit ${PIPESTATUS[0]}
+# python -m debugpy --listen 5678 --wait-for-client entry/train_rlhf.py -c ${config_dir}/gpt/rlhf.yaml 2>&1 | tee ${output_dir}/log_${RANK}.log ; exit ${PIPESTATUS[0]}
