@@ -21,22 +21,28 @@ import torch
 from tqdm import tqdm
 
 
-def setup_logger(log_level=None, model_name=None, ip_addr=None):
+def setup_logger(log_level=logging.INFO, model_name=None, ip_addr=None):
     logger_name = "ChatLearn" if model_name is None else f"ChatLearn-{model_name}"
+    
     _logger = logging.getLogger(logger_name)
-    if log_level is None:
-        log_level = logging.INFO
     _logger.setLevel(log_level)
+    
     handler = logging.StreamHandler()
+    handler.setLevel(log_level)
+    
     if ip_addr is None:
-        handler.setFormatter(logging.Formatter(
-            '[%(asctime)s %(name)s] (%(filename)s %(lineno)d): %(levelname)s %(message)s'))
+        formatter = logging.Formatter(
+            '[%(asctime)s %(name)s] (%(filename)s %(lineno)d): %(levelname)s %(message)s')
     else:
         rank = os.environ.get("RANK", 0)
-        handler.setFormatter(logging.Formatter(
-            f"[%(asctime)s %(name)s {ip_addr} RANK:{rank}] (%(filename)s %(lineno)d): %(levelname)s %(message)s"))
-    handler.setLevel(log_level)
+        formatter = logging.Formatter(
+            f"[%(asctime)s %(name)s {ip_addr} RANK:{rank}] (%(filename)s %(lineno)d): %(levelname)s %(message)s")
+    
+    handler.setFormatter(formatter)
     _logger.addHandler(handler)
+    
+    _logger.propagate = False
+    
     return _logger
 
 

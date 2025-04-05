@@ -45,6 +45,7 @@ rm ${MEGATRON}/megatron/fused_kernels/${build_path}/lock
 
 export PYTHONPATH=${MEGATRON}:${CHATLEARN}:${PYTHONPATH}
 export num_gpu=$(($WORLD_SIZE * $GPUS_PER_NODE))
+echo num_gpu=$num_gpu
 
 [ -z "$num_gpu_policy" ] && export num_gpu_policy=$num_gpu
 [ -z "$num_gpu_ref" ] && export num_gpu_ref=$num_gpu

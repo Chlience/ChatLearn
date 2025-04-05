@@ -119,6 +119,10 @@ class ModelManager:
             # place non-colocate models
             if model.name not in remote_states:
                 self.place_models_to_remote_devices([model], env_list)
+                
+        # ! 在参数同步时，可能会触发 NCCL Error，详见 model_manager.py
+        # ! 放置 GPU 有特殊策略
+        # ! 需要特定的 model reverse
         self.set_dist_env_concurrent(env_list)
         self.converted = True
         return self.dist_models
@@ -301,7 +305,7 @@ class ModelManager:
                 final_packs.extend(packs_list)
         return final_packs
 
-    def place_gpu_models(self, gpu_models, env_list=None):
+    def place_gpu_models(self, gpu_models:list[DistModel], env_list=None):
         """
         为需要 GPU 的模型分配 GPU，并创建 Actor
         根据打包策略将模型放置在不同的 GPU 上

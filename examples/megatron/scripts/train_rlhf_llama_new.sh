@@ -19,8 +19,10 @@ fi
 config_dir=${CHATLEARN}/examples/megatron/configs/
 
 if [[ "$backend" == "megatron" ]]; then
-  configs=${config_dir}/llama2/rlhf.yaml
+  echo "DISABLE_VLLM"
+  configs=${config_dir}/llama2/rlhf_new.yaml
 else
+  echo "ENABLE_VLLM"
   export ENABLE_VLLM=True
   if [ -z "$tokenizer_load" ];then
     echo "please set path to hf tokenizer for vllm backend, download from huggingface source."
@@ -141,5 +143,5 @@ num_gpu=${num_gpu} \
 data_path=${DATASET_PATH} \
 eval_data_path=${EVAL_DATASET_PATH} \
 sample_per_episode=${sample_per_episode} \
-python entry/train_rlhf.py -c $configs 2>&1 | tee ${log_file} ; exit ${PIPESTATUS[0]}
+python entry/train_rlhf_new.py -c $configs 2>&1 | tee ${log_file} ; exit ${PIPESTATUS[0]}
 # python -m debugpy --listen 5678 --wait-for-client entry/train_rlhf.py -c ${config_dir}/gpt/rlhf.yaml 2>&1 | tee ${output_dir}/log_${RANK}.log ; exit ${PIPESTATUS[0]}

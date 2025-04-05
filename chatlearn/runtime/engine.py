@@ -82,16 +82,16 @@ class BaseEngine:
             future.wait(ref_set_src)
         # include compile in init, compile dependencies need to be called serially
         logger.info(get_full_proc_memory_info('Before model init'))
-        # * initialize megatron
-        # * 为 megatron 传递应有的参数
+        # * 分布式初始化（Megatron / vLLM）
+        self.timers("model_init").start()
         for model in self.remote_models:
             model.init()
+        self.timers("model_init").stop()
         logger.info(get_full_proc_memory_info('After model init'))
         # do not include compile dependencies in setup
         # if the program hang in setup, may try to set concurrent_setup to False.
         self.timers("setup_models").start()
-        # * initialize megatron model
-        # * 为 megatron 传递应有的参数
+        # * 设置 model 参数和 load checkpoint
         if self.runtime_args.concurrent_setup:
             refs = []
             refs_val = []
@@ -107,8 +107,9 @@ class BaseEngine:
                 future.wait(model.validate())
                 logger.info(f"done setup and validate {model.name}")
         self.timers("setup_models").stop()
+        # * setup_models: 6450.05(avg: 6450.05)
         logger.info(
-            f"{LOG_START} setup_models summary {self.timers.log(names=['setup_models'])}")
+            f"{LOG_START} setup_models summary {self.timers.log(names=['setup_models', 'model_init'])}")
 
     def before_episode(self):
         for model in self.remote_models:
@@ -304,21 +305,22 @@ class Engine(BaseEngine):
         logger.info(
             f"{LOG_START} {self._name} setup summary {self.timers.log(names=['setup'])}")
         self.logging_memory()
-        self._resume_from_data_checkpoint()
-        data_loader = StreamDataset.remote(self.runtime_args.stream_data_loader_type,
-                                           self.runtime_args.train_micro_batch_size,
-                                           self.env._padding_config,
-                                           self.runtime_args.max_relay_episode,
-                                           self.runtime_args.relay_episode_offset)
-        logger.info(f"{LOG_START} " + get_full_proc_memory_info('Before first param sync'))
-        self.timers("sync_parameters").start()
-        self.model_manager.sync_parameters(requires_grad=False, validate=self.runtime_args.validate_param_sync)
-        self.timers("sync_parameters").stop()
-        logger.info(
-            f"{LOG_START} {self._name} sync_parameters summary {self.timers.log(names=['sync_parameters'])} " \
-            + get_full_proc_memory_info('After first param sync')
-        )
-        self._data_loader = data_loader
+        # self._resume_from_data_checkpoint()
+        # data_loader = StreamDataset.remote(self.runtime_args.stream_data_loader_type,
+        #                                    self.runtime_args.train_micro_batch_size,
+        #                                    self.env._padding_config,
+        #                                    self.runtime_args.max_relay_episode,
+        #                                    self.runtime_args.relay_episode_offset)
+        # logger.info(f"{LOG_START} " + get_full_proc_memory_info('Before first param sync'))
+        # self.timers("sync_parameters").start()
+        # self.model_manager.sync_parameters(requires_grad=False, validate=self.runtime_args.validate_param_sync)
+        # self.timers("sync_parameters").stop()
+        # logger.info(
+        #     f"{LOG_START} {self._name} sync_parameters summary {self.timers.log(names=['sync_parameters'])} " \
+        #     + get_full_proc_memory_info('After first param sync')
+        # )
+        # self._data_loader = data_loader
+        return
         for episode_id in range(self._start_episode, self.runtime_args.num_episode):
             if self.runtime_args.nsys:
                 if episode_id == 4:
@@ -333,31 +335,31 @@ class Engine(BaseEngine):
                 self.env.set_timers(self.timers)
             self.env.make_experiences()
             queue = self.env.make_experiences()
-            self.timers("set_train_dataset").start()
-            refs = data_loader.set_dataset.remote(queue, episode_id, self._relay_sample_fn,
-                                                  self.runtime_args.sample_per_episode)
-            future.wait(refs)
-            if self.trainer is not None:
-                # validate parameter sync in the first two episodes
-                validate = self.runtime_args.validate_param_sync and episode_id < 2
-                self.timers("set_train_dataset").stop()
-                self.trainer.set_data_loader(data_loader)
-                logger.info("set dataloader for trainer done")
-                logger.info(get_full_proc_memory_info(f'Before train {episode_id}'))
-                if self.trainer.timers is None:
-                    self.trainer.set_timers(self.timers)
-                self.trainer.train(episode_id)
-                logger.info(get_full_proc_memory_info(f'After train {episode_id}'))
-                logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} done")
-                self.timers("sync_parameters").start()
-                self.model_manager.sync_parameters(episode_id + 1, validate=validate)
-                self.timers("sync_parameters").stop()
-                logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} parameter sync done")
+            # self.timers("set_train_dataset").start()
+            # refs = data_loader.set_dataset.remote(queue, episode_id, self._relay_sample_fn,
+            #                                       self.runtime_args.sample_per_episode)
+            # future.wait(refs)
+            # if self.trainer is not None:
+            #     # validate parameter sync in the first two episodes
+            #     validate = self.runtime_args.validate_param_sync and episode_id < 2
+            #     self.timers("set_train_dataset").stop()
+            #     self.trainer.set_data_loader(data_loader)
+            #     logger.info("set dataloader for trainer done")
+            #     logger.info(get_full_proc_memory_info(f'Before train {episode_id}'))
+            #     if self.trainer.timers is None:
+            #         self.trainer.set_timers(self.timers)
+            #     self.trainer.train(episode_id)
+            #     logger.info(get_full_proc_memory_info(f'After train {episode_id}'))
+            #     logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} done")
+            #     self.timers("sync_parameters").start()
+            #     self.model_manager.sync_parameters(episode_id + 1, validate=validate)
+            #     self.timers("sync_parameters").stop()
+            #     logger.info(f"train episode_id: {episode_id + 1}/{self.runtime_args.num_episode} parameter sync done")
             self.after_episode()
             self.timers("episode").stop()
             self.logging_summary(episode_id)
-            self.save_checkpoint(episode_id)
-            self.evaluate(episode_id)
+            # self.save_checkpoint(episode_id)
+            # self.evaluate(episode_id)
 
         self.timers("chatlearn").stop()
         logger.info(f"{LOG_START} {self._name} overall summary {self.timers.log(names=['chatlearn'])}")

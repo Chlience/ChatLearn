@@ -9,7 +9,7 @@ runtime_env:
 
 models:
   policy:
-    model_config_file: vllm_policy_inference.yaml
+    model_config_file: old_policy_inference.yaml
     num_gpu: ${num_gpu_policy:16}
     trainable: False
     batch_generation:
@@ -29,14 +29,12 @@ models:
     model_config_file: reward_inference.yaml
     num_gpu: ${num_gpu_reward:16}
     trainable: False
-    generation_batch_size: ${reward_generation_batch_size:4}
     free_memory: ${free_memory_reward:False}
 
   value:
     model_config_file: old_value_inference.yaml
     num_gpu: ${num_gpu_value:16}
     trainable: False
-    generation_batch_size: ${value_generation_batch_size:4}
     free_memory: ${free_memory_value:False}
 
   ppo_policy:
@@ -65,7 +63,7 @@ models:
 
 runtime:
   colocation:
-    - policy,ppo_policy,reward,reference,value,ppo_value
+    - policy,reward,reference,value
   generation_batch_size: ${generation_batch_size:4}
   train_micro_batch_size: ${train_micro_batch_size:2}
   train_global_batch_size: ${train_global_batch_size:512}
@@ -79,7 +77,8 @@ runtime:
   eval_data_num_limit: ${eval_data_num_limit:128}
   eval_episode_interval: ${eval_episode_interval:100}
   data_checkpoint_path: ${data_checkpoint_path}
-  output_dir: ${output_dir}
+  free_sync_collective_group: ${free_sync_collective_group:False}
   exp_name: ${exp_name:chatlearn}
+  output_dir: ${output_dir}
   debug: ${debug:False}
   validate_param_sync: ${validate_param_sync:False}

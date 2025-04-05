@@ -81,40 +81,44 @@ class BaseEngine:
         for model in self.remote_models:
             setattr(self, model.name, model)
 
-        if hasattr(self, '_param_sync_pairs'):
-            ref_set_src = []
-            for src_model, dst_model in self._param_sync_pairs:
-                remote_src_model = getattr(self, src_model.name)
-                remote_dst_model = getattr(self, dst_model.name)
-                ref_set_src += remote_dst_model.set_src_parameter_model(remote_src_model)
-            future.wait(ref_set_src)
+        # TODO 将 set_src_parameter_model 调整到后面
+        # if hasattr(self, '_param_sync_pairs'):
+        #     ref_set_src = []
+        #     for src_model, dst_model in self._param_sync_pairs:
+        #         remote_src_model = getattr(self, src_model.name)
+        #         remote_dst_model = getattr(self, dst_model.name)
+        #         ref_set_src += remote_dst_model.set_src_parameter_model(remote_src_model)
+        #     future.wait(ref_set_src)
         # include compile in init, compile dependencies need to be called serially
-        logger.info(get_full_proc_memory_info('Before model init'))
-        # * initialize megatron
-        # * 为 megatron 传递应有的参数
-        for model in self.remote_models:
-            model.init()
-        logger.info(get_full_proc_memory_info('After model init'))
+        
+        # * 将 model.init() 移动到 add_replica
+        # logger.info(get_full_proc_memory_info('Before model init'))
+        # for model in self.remote_models:
+        #     model.init()
+        # logger.info(get_full_proc_memory_info('After model init'))
+        
         # do not include compile dependencies in setup
         # if the program hang in setup, may try to set concurrent_setup to False.
-        # TODO model_setup 将会为所有 model 进行初始化（已分配好并行参数从而有选择的初始化）
-        # TODO 此时需要保证 replicas 已经成功建立
-        # TODO 需要将初始化过程移动到 replicas 的初始化过程中
-        if self.runtime_args.concurrent_setup:
-            refs = []
-            refs_val = []
-            for model in self.remote_models:
-                refs += model.model_setup()
-                refs_val += model.validate()
-            future.wait(refs)
-            future.wait(refs_val)
-        else:
-            # * 真正的 model.setup
-            # * 调用 megatron 加载 checkpoint
-            for model in self.remote_models:
-                future.wait(model.model_setup())
-                future.wait(model.validate())
-        logger.info("done setup all models")
+        
+        # * 移动 model.setup_models() 到 add_replica
+        # self.timers("setup_models").start()
+        # if self.runtime_args.concurrent_setup:
+        #     refs = []
+        #     refs_val = []
+        #     for model in self.remote_models:
+        #         refs += model.model_setup()
+        #         refs_val += model.validate()
+        #     future.wait(refs)
+        #     future.wait(refs_val)
+        # else:
+        #     for model in self.remote_models:
+        #         logger.info(f"start setup and validate {model.name}")
+        #         future.wait(model.model_setup())
+        #         future.wait(model.validate())
+        #         logger.info(f"done setup and validate {model.name}")
+        # self.timers("setup_models").stop()
+        # logger.info(
+        #     f"{LOG_START} setup_models summary {self.timers.log(names=['setup_models'])}")
 
     def before_episode(self):
         for model in self.remote_models:
@@ -522,15 +526,7 @@ class RLHFEngine(Engine):
             if self.scheduler.is_stopped():
                 break
             # TODO 目前写死 scheduler add_replica
-            self.timers("add_replica").start()
-            self.model_manager.add_replica(name="policy", num_gpus=0.1)
-            self.timers("add_replica").stop()
-            self.timers("add_replica").start()
-            self.model_manager.add_replica(name="policy", num_gpus=0.1)
-            self.timers("add_replica").stop()
-            self.timers("add_replica").start()
-            self.model_manager.add_replica(name="policy", num_gpus=0.1)
-            self.timers("add_replica").stop()
+            self.model_manager.add_replica(name="policy", num_gpu_per_actor=1)
             for model in self.models:
                 self.compute_one_step_one_model(model)
             break

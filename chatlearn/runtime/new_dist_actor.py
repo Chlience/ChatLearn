@@ -220,6 +220,7 @@ class DistTorchActor(DistActor):
         return ordered_actors
 
     def set_dist_env(self, revert_placement=False):
+        """ 为所有 actor 设置远程环境，覆盖之前的环境设置 """
         # self.all_actors = self.reorder_actors(self.all_actors, revert_placement)
         master_addr = future.get(self.master.get_address.remote())
         master_port = future.get(self._port_manager.get_free_port.remote(master_addr))
@@ -229,17 +230,19 @@ class DistTorchActor(DistActor):
         ret = []
         for rank, actor in enumerate(self.all_actors):
             env_config["RANK"] = rank
+            # * local rank 的换算比较简单，切换时需要特殊处理
             if self.model.gpu_per_process == 1:
                 local_rank = 0
             else:
                 local_rank = rank % self.model.gpu_per_process
             env_config["LOCAL_RANK"] = local_rank
+            # * actor 设置远程环境
             ret.append(actor.set_env.remote(env_config))
         status = sum(future.get(ret))
         assert status == world_size
 
 class DistVLLMActor(DistTorchActor):
-    """DistVLLMActor"""
+    """ Only for VLLMModuleV2 """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -317,7 +320,6 @@ class DistModel:
         self._is_colocate = False
         self._colocate_models = []
         self._model = model
-        self.name = model.name
         self.node = None
 
     def add_replica(self, replica):
@@ -328,6 +330,10 @@ class DistModel:
         if self._model is not None:
             return self._model
         return self.model
+    
+    @property
+    def name(self):
+        return self.model.name
 
     @property
     def trainable(self):

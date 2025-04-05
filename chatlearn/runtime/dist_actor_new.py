@@ -230,7 +230,7 @@ class DistTorchActor(DistActor):
         assert status == world_size
 
 class DistVLLMActor(DistTorchActor):
-    """ Only for VLLMModuleV2 """
+    """DistVLLMActor"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

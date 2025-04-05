@@ -28,7 +28,7 @@ from chatlearn.models.torch_module import TorchModule
 from chatlearn.models.vllm_module_v2 import VLLMModuleV2
 from chatlearn.runtime.decorator import decorate_class_func
 from chatlearn.runtime.decorator import timeit, preprocess_compute, monitor_error
-from chatlearn.runtime.dist_actor import DistActor, DistTorchActor, DistVLLMActor, DistModel
+from chatlearn.runtime.new_dist_actor import DistActor, DistTorchActor, DistVLLMActor, DistModel
 from chatlearn.synchronizer.parameter_sync import ParameterSyncGroup, ParameterSyncGroupwithHEP
 from chatlearn.utils.error_monitor import ErrorMonitor, ErrorSignalActor
 from chatlearn.utils.logger import logger
@@ -72,12 +72,9 @@ class ModelManager:
             self.dist_models.append(dist_model)
             self._name2distmodel[model.name] = dist_model
 
-        # ! 在参数同步时，可能会触发 NCCL Error，详见 model_manager.py
-        # ! 放置 GPU 有特殊策略
-        
-        # * 在 add_replica 时已经调整了对应的 Env
-        # * 此处不再需要调整
-        self.set_dist_env_concurrent([])
+        # * 删除 GPU 检查
+        # * 移动 place_models_to_remote_devices 到 add_replica
+        # * 移动 set_dist_env_concurrent 到 add_replica 并删除 reverse
         self.converted = True
         return self.dist_models
 
@@ -202,11 +199,11 @@ class ModelManager:
                     models_to_revert.append(model)
         return models_to_revert
 
-    def add_replica(self, name, num_gpus):
+    def add_replica(self, name, num_gpu_per_actor=1):
         """
         Add a replica to the model
         """
-        dist_model = self._name2distmodel[name]
+        dist_model:DistModel = self._name2distmodel[name]
         
         def actor_type():
             if isinstance(dist_model.model, VLLMModuleV2):
@@ -218,17 +215,30 @@ class ModelManager:
         dist_actor = actor_type()(dist_model.model, self.resouce_manager.gpu_per_node, self.error_signal, self._port_manager,
                                   replica_id=0, storage=self._storage)
         dist_model.add_replica(dist_actor)
+        
         import time
-        t1 = time.time()
-        dist_actor.create_actor_without_group(num_gpus)
-        t2 = time.time()
-        # * 为 DistActor 设置对 Ray.actor 的远程调用
+        time_now = time.time()
+        # * place_gpu_models()
+        for _ in range(dist_model.num_gpu_per_replica):
+            dist_actor.create_actor_without_group(num_gpu_per_actor)
+        time_after_create_actor = time.time()
+        # * preprocess_actors()
         dist_actor.preprocess_actors()
-        t3 = time.time()
-        # TODO 设置分布式环境，需修改
+        time_after_preprocess_actors = time.time()
+        # * set_dist_env_concurrent()
         dist_actor.set_dist_env()
-        t4 = time.time()
-        print(f"create_actor_without_group: {t2-t1}s, preprocess_actors: {t3-t2}s, set_dist_env: {t4-t3}s")
+        # * model.init()
+        future.wait(dist_actor.init())
+        time_after_actor_init = time.time()
+        # * model.model_setup()/validate()
+        future.wait(dist_actor.model_setup())
+        time_after_model_setup = time.time()
+        future.wait(dist_actor.validate())
+        time_after_validate = time.time()
+        
+        logger.info(f"Added replica for model {name} with {dist_model.num_gpu_per_replica} GPUs.")
+        logger.info(f"Add replica time: | preprocess_actors: {time_after_preprocess_actors - time_now:.2f}s | actor_init: {time_after_actor_init - time_after_preprocess_actors:.2f}s | model_setup: {time_after_model_setup - time_after_actor_init:.2f}s | validate: {time_after_validate - time_after_model_setup:.2f}s | total: {time_after_validate - time_now:.2f}s")
+        
 
     def _set_dist_env(self, model, reverse):
         for replica in model.replicas:
